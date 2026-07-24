@@ -5,7 +5,7 @@ document.addEventListener('wheel', () => {
 }, { passive: true });
 
 /* ── CONFIG ── */
-const BASE        = 'https://YOUR-DOMAIN.com/api';
+const BASE        = 'https://lightcoral-lemur-755075.hostingersite.com/api';
 const API         = `${BASE}/members`;
 const TAPI        = `${BASE}/trainers`;
 const PROFILE_API = `${BASE}/auth/profile`;
@@ -463,6 +463,45 @@ function calculateRevenue(members) {
   return revenue;
 }
 
+/* Sums payments whose date falls on a given day (default: today). Used
+   for the "Today's Collection" figures on the Home and Revenue pages. */
+function getRevenueForDate(members, dateStr) {
+  let total = 0, online = 0, cash = 0;
+  members.forEach(m => {
+    (m.paymentHistory || []).forEach(p => {
+      if (!p.date) return;
+      const d = new Date(p.date).toISOString().split('T')[0];
+      if (d !== dateStr) return;
+      const amt = p.amount || 0;
+      total += amt;
+      if ((p.method || 'cash') === 'cash') cash += amt; else online += amt;
+    });
+  });
+  return { total, online, cash };
+}
+
+/* Sums payments within an inclusive date range (both 'YYYY-MM-DD' strings).
+   Used by the Revenue page's From/To filter. */
+function getRevenueInRange(members, fromStr, toStr) {
+  const out = { total: 0, online: 0, cash: 0, plan: 0, admission: 0, pt: 0, entries: [] };
+  members.forEach(m => {
+    (m.paymentHistory || []).forEach(p => {
+      if (!p.date) return;
+      const d = new Date(p.date).toISOString().split('T')[0];
+      if (fromStr && d < fromStr) return;
+      if (toStr && d > toStr) return;
+      const amt = p.amount || 0;
+      out.total += amt;
+      if ((p.method || 'cash') === 'cash') out.cash += amt; else out.online += amt;
+      if (p.type === 'admission') out.admission += amt;
+      else if (p.type === 'pt') out.pt += amt;
+      else out.plan += amt;
+      out.entries.push({ member: m, payment: p });
+    });
+  });
+  return out;
+}
+
 /* ── DASHBOARD ── */
 function renderRevenueDashboard(revenue) {
   const today = new Date();
@@ -532,7 +571,7 @@ function renderDashTable(membersList) {
           ${avImgDash(m)}
         </div>
         <!-- Details -->
-        <div style="flex:1;min-width:0;padding:10px 6px 8px 0" onclick="openEditMember('${safeId_d}')">
+        <div style="flex:1;min-width:0;padding:10px 6px 8px 0;display:flex;flex-direction:column;justify-content:center;gap:1px" onclick="openEditMember('${safeId_d}')">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
             <span style="font-weight:800;font-size:1rem;color:#1A2E2E;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${safeName_d}</span>
             <span style="font-size:.6rem;font-weight:800;color:#fff;background:#1A8C8C;padding:1px 6px;border-radius:7px;white-space:nowrap;flex-shrink:0">ID #${m.memberNo||''}</span>
@@ -625,6 +664,11 @@ async function loadDashboard() {
 
     const revenue = calculateRevenue(members);
     renderRevenueDashboard(revenue);
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const todayRev = getRevenueForDate(members, todayStr);
+    const revTodayEl = document.getElementById('revTodayTotal');
+    if (revTodayEl) revTodayEl.textContent = `₹${todayRev.total.toLocaleString('en-IN')}`;
 
     const today = new Date();
     today.setHours(0,0,0,0);
@@ -1953,6 +1997,23 @@ async function loadPayments() {
 /* ── REVENUE PAGE ── */
 let _revenueSearchQuery = '';
 
+let _revenueFromDate = '';
+let _revenueToDate = '';
+
+function applyRevenueDateFilter() {
+  _revenueFromDate = document.getElementById('revenueFromDate')?.value || '';
+  _revenueToDate = document.getElementById('revenueToDate')?.value || '';
+  loadRevenuePage();
+}
+
+function clearRevenueDateFilter() {
+  _revenueFromDate = '';
+  _revenueToDate = '';
+  const f = document.getElementById('revenueFromDate'); if (f) f.value = '';
+  const t = document.getElementById('revenueToDate'); if (t) t.value = '';
+  loadRevenuePage();
+}
+
 function filterRevenue() {
   _revenueSearchQuery = (document.getElementById('revenueSearch')?.value || '').toLowerCase().trim();
   loadRevenuePage();
@@ -1969,7 +2030,38 @@ async function loadRevenuePage() {
       ? allMembers.filter(m => (m.name||'').toLowerCase().includes(_revenueSearchQuery) || String(m.memberNo||'').includes(_revenueSearchQuery))
       : allMembers;
     const revenue = calculateRevenue(members);
-    
+
+    // Custom date-range filter (From/To), independent of the fixed 3-month view below
+    let rangeHtml = '';
+    if (_revenueFromDate || _revenueToDate) {
+      const range = getRevenueInRange(members, _revenueFromDate, _revenueToDate);
+      const label = _revenueFromDate && _revenueToDate
+        ? `${new Date(_revenueFromDate).toLocaleDateString('en-IN')} — ${new Date(_revenueToDate).toLocaleDateString('en-IN')}`
+        : _revenueFromDate ? `From ${new Date(_revenueFromDate).toLocaleDateString('en-IN')}`
+        : `Up to ${new Date(_revenueToDate).toLocaleDateString('en-IN')}`;
+      rangeHtml = `
+      <div style="background:#F0F5F5;border:2px solid #1A8C8C;border-radius:14px;padding:14px;margin-bottom:16px">
+        <div style="font-size:.65rem;font-weight:800;color:#1A8C8C;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📅 ${label}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;text-align:center">
+          <div>
+            <div style="font-size:.6rem;color:#8AABAB;font-weight:700">Total</div>
+            <div style="font-size:1.15rem;font-weight:800;color:#1A2E2E">₹${range.total.toLocaleString('en-IN')}</div>
+          </div>
+          <div>
+            <div style="font-size:.6rem;color:#8AABAB;font-weight:700">📱 Online</div>
+            <div style="font-size:1rem;font-weight:800;color:#1A2E2E">₹${range.online.toLocaleString('en-IN')}</div>
+          </div>
+          <div>
+            <div style="font-size:.6rem;color:#8AABAB;font-weight:700">💵 Cash</div>
+            <div style="font-size:1rem;font-weight:800;color:#1A2E2E">₹${range.cash.toLocaleString('en-IN')}</div>
+          </div>
+        </div>
+        <div style="font-size:.62rem;color:#4A6464;font-weight:600;margin-top:8px;text-align:center">
+          Plan: ₹${range.plan.toLocaleString('en-IN')} | PT: ₹${range.pt.toLocaleString('en-IN')} | Admission: ₹${range.admission.toLocaleString('en-IN')} · ${range.entries.length} payment${range.entries.length===1?'':'s'}
+        </div>
+      </div>`;
+    }
+
     const today = new Date();
     const monthLabels = [];
     for (let i = 0; i < 3; i++) {
@@ -1983,6 +2075,7 @@ async function loadRevenuePage() {
     }
 
     let html = `
+      ${rangeHtml}
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
         ${monthKeys.map((key, idx) => {
           const data = revenue.months[key] || { total: 0, plan: 0, admission: 0, pt: 0, online: 0, cash: 0 };
