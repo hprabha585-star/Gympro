@@ -672,7 +672,19 @@ async function loadDashboard() {
     }
 
     dashMembersCache = sorted;
-    renderDashTable(sorted.slice(0,8));
+    // Default dashboard view: only members expiring within 7 days (or already
+    // overdue) — the ones that actually need attention — instead of an
+    // arbitrary "first 8" slice. The 3d/5d/7d/All buttons still work as before.
+    const todayDT = new Date(); todayDT.setHours(0,0,0,0);
+    const sevenDaysOut = new Date(todayDT); sevenDaysOut.setDate(todayDT.getDate() + 7); sevenDaysOut.setHours(23,59,59,999);
+    const urgentDefault = sorted.filter(m => {
+      if (m.status !== 'Active' && m.status !== 'Trial') return false;
+      if (!m.expiryDate) return false;
+      const p = m.expiryDate.split('T')[0].split('-');
+      const exp = new Date(+p[0], +p[1]-1, +p[2]);
+      return exp <= sevenDaysOut; // includes overdue/expired too — most urgent first
+    });
+    renderDashTable(urgentDefault);
     _fillExtraDashTiles(members);
 
   } catch(e) { 
@@ -737,12 +749,9 @@ function _renderMemberCard(m, idx) {
           </div>
           <div style="font-size:.75rem;font-weight:800;color:#27AE60">Paid: ₹${(m.lastPaymentAmount||m.planPrice||0).toLocaleString('en-IN')}</div>
         </div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;margin-top:2px">
-          <div style="font-size:.72rem;color:#8AABAB">
-            <span style="font-weight:600">Payment Date: </span>
-            <span style="font-weight:700;color:#4A6464">${m.lastPaymentDate ? new Date(m.lastPaymentDate).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—'}</span>
-          </div>
-          ${Number(m.pendingAmount) > 0 ? `<span style="font-size:.68rem;font-weight:800;color:#E74C3C;background:#FEECEB;padding:2px 8px;border-radius:10px;white-space:nowrap">⚠️ Due ₹${Number(m.pendingAmount).toLocaleString('en-IN')}</span>` : ''}
+        <div style="font-size:.72rem;color:#8AABAB;margin-top:2px">
+          <span style="font-weight:600">Payment Date: </span>
+          <span style="font-weight:700;color:#4A6464">${m.lastPaymentDate ? new Date(m.lastPaymentDate).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—'}</span>
         </div>
       </div>
       
@@ -754,8 +763,7 @@ function _renderMemberCard(m, idx) {
       <button onclick="openMemberAttendance('${safeId}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:58px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">📅</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Attendance</span></button>
       <button onclick="openPaymentFor({id:'${safeId}',name:'${safeName}',plan:'${safePlan}',expiryDate:'${m.expiryDate||''}',planPrice:${m.planPrice||0},ptEnabled:${!!m.ptEnabled},ptFee:${m.ptFee||0},admissionFee:${m.admissionFee||0},admissionWaived:${!!m.admissionWaived}})" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:62px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">🔄</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Renew Plan</span></button>
       <button onclick="sendAttendanceReport('${safeId}','${esc(m.phone||'')}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">📊</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Attend</span></button>
-      <button onclick="sendPaymentReminder('${safeId}','${esc(m.phone||'')}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">💰</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Reminder</span></button>
-      <button onclick="shareLastReceipt('${safeId}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;flex-shrink:0"><span style="font-size:1rem">🧾</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Receipt</span></button>
+      <button onclick="sendPaymentReminder('${safeId}','${esc(m.phone||'')}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;flex-shrink:0"><span style="font-size:1rem">💰</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Reminder</span></button>
       <button onclick="openEditMember('${safeId}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:48px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-left:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">✏️</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Edit</span></button>
       <button onclick="delMember('${safeId}','${safeName.replace(/'/g,"\\'")}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:48px;padding:5px 8px;border:none;background:#FFF0F0;cursor:pointer;border-left:1px solid #FECDD5;flex-shrink:0"><span style="font-size:1rem">🗑️</span><span style="font-size:.52rem;font-weight:700;color:#E74C3C">Delete</span></button>
     </div>
@@ -1941,6 +1949,24 @@ async function loadPayments() {
     in14Days.setDate(today.getDate() + 14);
     in14Days.setHours(23,59,59,999);
 
+    // ── Pending balances: members who paid less than the full amount ──
+    const pendingMembers = members.filter(m => Number(m.pendingAmount) > 0);
+    let pendingHtml = '';
+    if (pendingMembers.length) {
+      pendingHtml = `
+      <div style="margin-bottom:18px">
+        <div style="font-size:.72rem;font-weight:800;color:#E74C3C;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">⚠️ Pending Payments (${pendingMembers.length})</div>
+        ${pendingMembers.map(m => `
+          <div class="pay-row" style="border:1.5px solid #FEECEB;background:#FFFBFB">
+            <div style="display:flex;align-items:center;gap:12px">${avImg(m)}<div><div style="font-weight:700;font-size:.85rem">${esc(m.name)}</div><div style="font-size:.72rem;color:var(--tx3)">${esc(m.plan||'')}</div></div></div>
+            <span class="badge" style="background:#FEECEB;color:#E74C3C;font-weight:800">Due ₹${Number(m.pendingAmount).toLocaleString('en-IN')}</span>
+            <div style="display:flex;gap:6px;flex-shrink:0">
+              <button class="btn btn-success btn-sm" onclick="openCollectDue('${esc(String(m._id||''))}')">💰 Receive</button>
+            </div>
+          </div>`).join('')}
+      </div>`;
+    }
+
     const due = members.filter(m => {
       if(m.status !== 'Active') return false;
       const p = m.expiryDate.split('T')[0].split('-');
@@ -1950,11 +1976,15 @@ async function loadPayments() {
 
     due.sort((a,b) => new Date(a.expiryDate) - new Date(b.expiryDate));
 
-    if(!due.length){
+    if(!due.length && !pendingMembers.length){
       container.innerHTML = '<div class="empty"><div class="ei">✅</div><p>No payments due in 14 days!</p></div>';
       return;
     }
-    container.innerHTML = due.map(m => {
+    if (!due.length) {
+      container.innerHTML = pendingHtml + '<div class="empty"><div class="ei">✅</div><p>No renewals due in 14 days!</p></div>';
+      return;
+    }
+    container.innerHTML = pendingHtml + due.map(m => {
       const p = m.expiryDate.split('T')[0].split('-');
       const expDate = new Date(p[0], p[1]-1, p[2]);
       const d = Math.ceil((expDate - today)/86400000);
@@ -2078,6 +2108,70 @@ function openPaymentForById(id) {
   const m = allMembersCache.find(x => (x._id||x.id) === id);
   if (!m) { toast('Member not found - please refresh','error'); return; }
   openPaymentFor(m, false);
+}
+
+/* "💰 Receive" — collects some or all of a member's outstanding pending
+   balance. Reuses the payment modal in a minimal mode (no plan/PT/discount
+   fields), fixed total = their current pendingAmount. */
+function openCollectDue(id) {
+  const m = allMembersCache.find(x => (x._id||x.id) === id);
+  if (!m) { toast('Member not found - please refresh','error'); return; }
+  const due = Number(m.pendingAmount) || 0;
+  if (due <= 0) { toast('This member has no pending balance','error'); return; }
+
+  curPayMember = { id: m._id || m.id, name: m.name, expiryDate: m.expiryDate, isNew: false, mode: 'due', originalData: m };
+
+  const mhdr = document.querySelector('#paymentModal .mhdr .mtitle');
+  if (mhdr) mhdr.textContent = '💰 Collect Pending Payment';
+
+  const planRow = document.getElementById('payPlanRow');
+  const ptBox = document.getElementById('payPtEnabled')?.closest('.pt-box');
+  const datesRow = document.getElementById('payDatesRow');
+  const payDiscBox = document.getElementById('payDiscBox');
+  if (planRow) planRow.style.display = 'none';
+  if (ptBox) ptBox.style.display = 'none';
+  if (datesRow) datesRow.style.display = 'none';
+  if (payDiscBox) payDiscBox.style.display = 'none';
+
+  const payDateEl = document.getElementById('payRenewalPayDate');
+  if (payDateEl) payDateEl.value = getLocalTodayStr();
+
+  curPayTotal = due;
+  const infoEl = document.getElementById('payInfo');
+  if (infoEl) {
+    infoEl.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r3);padding:12px;margin-bottom:.6rem">
+      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+        <span style="color:var(--tx2);font-size:.82rem">Member</span>
+        <strong style="font-size:.82rem">${esc(m.name)}</strong>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1.5px solid var(--border);margin-top:6px">
+        <span style="font-weight:800;font-size:.88rem">Pending Balance</span>
+        <strong style="color:#E74C3C;font-size:1.05rem">₹${due.toLocaleString('en-IN')}</strong>
+      </div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">
+        <label style="font-size:.7rem;font-weight:800;color:#1A8C8C;display:block;margin-bottom:5px">💰 Amount Received Now</label>
+        <input type="number" id="payAmountReceived" value="${due}" min="0" max="${due}" step="1"
+          oninput="updatePendingDisplay(${due})"
+          style="width:100%;padding:9px 10px;border:2px solid #E0ECEC;border-radius:10px;font-family:inherit;font-size:.9rem;font-weight:700">
+        <div id="pendingDisplayRow" style="font-size:.75rem;font-weight:700;color:#27AE60;margin-top:5px">✅ Fully paid — no pending balance</div>
+      </div>
+    </div>`;
+  }
+
+  curPayMethod = null;
+  ['Upi','Cash','Card'].forEach(n => {
+    const btn = document.getElementById(`pm${n}`);
+    if (!btn) return;
+    btn.style.borderColor = '#E0ECEC'; btn.style.background = '#fff'; btn.style.color = '#4A6464';
+  });
+  ['payUpiPanel','payCashPanel','payCardPanel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  const confirmBtn = document.getElementById('confirmPayBtn');
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.style.opacity = '.5'; confirmBtn.textContent = 'Select a payment method above'; }
+
+  openModal('paymentModal');
 }
 
 function openPaymentFor(m, isNew = false) {
@@ -2365,6 +2459,56 @@ async function confirmPayment() {
   const method = curPayMethod;
   const total = curPayTotal || 0;
   const paymentDate = document.getElementById('payRenewalPayDate')?.value || getLocalTodayStr();
+
+  // ── Collecting a pending/due balance (not a new payment or renewal) ──
+  if (curPayMember.mode === 'due') {
+    const received = Math.max(0, Math.min(total, parseFloat(document.getElementById('payAmountReceived')?.value) || total));
+    const remainingDue = Math.max(0, total - received);
+
+    const btn = document.getElementById('confirmPayBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
+    try {
+      const cached = allMembersCache.find(x => (x._id||x.id) === curPayMember.id) || {};
+      const entry = {
+        amount: received,
+        date: new Date(paymentDate),
+        method: method,
+        receiptNo: 'REC-DUE-' + Date.now(),
+        type: 'due_payment'
+      };
+      const updatedHistory = [...(cached.paymentHistory || []), entry];
+
+      const res = await fetch(`${API}/${curPayMember.id}`, {
+        method: 'PUT', headers: hdrs(),
+        body: JSON.stringify({
+          pendingAmount: remainingDue,
+          lastPaymentDate: new Date(paymentDate),
+          lastPaymentMethod: method,
+          lastPaymentAmount: received,
+          paymentHistory: updatedHistory
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(()=>({}));
+        throw new Error(err.error || `Server error ${res.status}`);
+      }
+
+      const methodLabel = { upi:'📱 UPI', cash:'💵 Cash', card:'💳 Card' }[method] || method;
+      toast(remainingDue > 0
+        ? `✅ ${methodLabel} ₹${received.toLocaleString('en-IN')} received — ₹${remainingDue.toLocaleString('en-IN')} still pending`
+        : `✅ ${methodLabel} ₹${received.toLocaleString('en-IN')} received — fully paid!`, 'success');
+
+      closeModal('paymentModal');
+      const dueName = curPayMember.name, dueId = curPayMember.id;
+      curPayMember = null; curPayMethod = null;
+      loadDashboard(); loadAllMembers(); loadPayments();
+      shareReceiptFor(dueId, dueName, received, remainingDue, method, entry.receiptNo);
+    } catch (e) {
+      toast(`❌ ${e.message || 'Network error — check connection'}`, 'error');
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Confirm Payment'; }
+    return;
+  }
 
   if (curPayMember.isNew) {
     const m = curPayMember.originalData;
@@ -2806,7 +2950,7 @@ ${urgencyLine}
 
 📋 Plan: *${plan}*
 📅 Expiry: *${expDate}*
-${Number(m.pendingAmount) > 0 ? `💰 Pending Balance: *₹${Number(m.pendingAmount).toLocaleString('en-IN')}*\n` : ''}
+
 Please renew your membership to continue your fitness journey without interruption. 💪
 
 Contact us to renew today!
