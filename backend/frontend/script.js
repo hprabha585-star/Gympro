@@ -1956,14 +1956,21 @@ async function loadPayments() {
       pendingHtml = `
       <div style="margin-bottom:18px">
         <div style="font-size:.72rem;font-weight:800;color:#E74C3C;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">⚠️ Pending Payments (${pendingMembers.length})</div>
-        ${pendingMembers.map(m => `
-          <div class="pay-row" style="border:1.5px solid #FEECEB;background:#FFFBFB">
-            <div style="display:flex;align-items:center;gap:12px">${avImg(m)}<div><div style="font-weight:700;font-size:.85rem">${esc(m.name)}</div><div style="font-size:.72rem;color:var(--tx3)">${esc(m.plan||'')}</div></div></div>
+        ${pendingMembers.map(m => {
+          const safePhone_p = esc(m.phone||'');
+          const safeId_p = esc(String(m._id||''));
+          const safeName_p = esc(m.name||'');
+          return `
+          <div class="pay-row" style="border:1.5px solid #FEECEB;background:#FFFBFB;flex-wrap:wrap;gap:8px">
+            <div style="display:flex;align-items:center;gap:12px">${avImg(m)}<div><div style="font-weight:700;font-size:.85rem">${safeName_p}</div><div style="font-size:.72rem;color:var(--tx3)">${esc(m.plan||'')}</div></div></div>
             <span class="badge" style="background:#FEECEB;color:#E74C3C;font-weight:800">Due ₹${Number(m.pendingAmount).toLocaleString('en-IN')}</span>
             <div style="display:flex;gap:6px;flex-shrink:0">
-              <button class="btn btn-success btn-sm" onclick="openCollectDue('${esc(String(m._id||''))}')">💰 Receive</button>
+              <button class="btn btn-sm" style="background:#E3F2FD;color:#2980B9" onclick="dialPhone('${safePhone_p}')" title="Call">📞</button>
+              <button class="btn btn-sm" style="background:#FEF6E7;color:#F39C12" onclick="sendPaymentReminder('${safeId_p}','${safePhone_p}','${safeName_p}')" title="Send reminder">🔔</button>
+              <button class="btn btn-success btn-sm" onclick="openCollectDue('${safeId_p}')">💰 Receive</button>
             </div>
-          </div>`).join('')}
+          </div>`;
+        }).join('')}
       </div>`;
     }
 
@@ -1988,12 +1995,17 @@ async function loadPayments() {
       const p = m.expiryDate.split('T')[0].split('-');
       const expDate = new Date(p[0], p[1]-1, p[2]);
       const d = Math.ceil((expDate - today)/86400000);
-      return `<div class="pay-row">
+      const safePhone_r = esc(m.phone||'');
+      const safeId_r = esc(String(m._id||''));
+      const safeName_r = esc(String(m.name||''));
+      return `<div class="pay-row" style="flex-wrap:wrap;gap:8px">
         <div style="display:flex;align-items:center;gap:12px">${avImg(m)}<div><div style="font-weight:700;font-size:.85rem">${esc(m.name)}</div><div style="font-size:.72rem;color:var(--tx3)">${esc(m.plan)}</div><div style="font-size:.7rem;color:var(--tx3)">Exp: ${fmt(m.expiryDate)}</div></div></div>
         <span class="badge ${d<0?'b-inactive':'b-trial'}">${d<0?'Overdue':d+'d'}</span>
         <div style="display:flex;gap:6px;flex-shrink:0">
-          <button class="btn btn-success btn-sm" onclick="openPaymentForById('${esc(String(m._id||''))}')">Renew</button>
-          <button class="btn btn-sm" style="background:#FFF0F0;color:#E74C3C" onclick="delMember('${esc(String(m._id||''))}','${esc(String(m.name||'').replace(/'/g,"\\'"))}')">🗑️</button>
+          <button class="btn btn-sm" style="background:#E3F2FD;color:#2980B9" onclick="dialPhone('${safePhone_r}')" title="Call">📞</button>
+          <button class="btn btn-sm" style="background:#FEF6E7;color:#F39C12" onclick="sendPaymentReminder('${safeId_r}','${safePhone_r}','${safeName_r}')" title="Send reminder">🔔</button>
+          <button class="btn btn-success btn-sm" onclick="openPaymentForById('${safeId_r}')">Renew</button>
+          <button class="btn btn-sm" style="background:#FFF0F0;color:#E74C3C" onclick="delMember('${safeId_r}','${safeName_r.replace(/'/g,"\\'")}')">🗑️</button>
         </div>
       </div>`;
     }).join('');
@@ -2518,36 +2530,51 @@ async function confirmPayment() {
     const ptAmt   = (m.ptEnabled && m.ptFee > 0) ? (Number(m.ptFee) || 0) : 0;
     const planAmt = (Number(m.planPrice) > 0) ? Number(m.planPrice) : Math.max(0, total - admAmt - ptAmt);
 
-    const payEntry = {
-      amount: planAmt,
-      date: new Date(paymentDate),
-      method: method,
-      receiptNo: 'REC-' + Date.now(),
-      type: 'plan'
-    };
-
-    const entries = [payEntry];
-    if (admAmt > 0) {
-      entries.push({
-        amount: admAmt,
-        date: new Date(paymentDate),
-        method: method,
-        receiptNo: 'REC-ADM-' + Date.now(),
-        type: 'admission'
-      });
-    }
-    if (ptAmt > 0) {
-      entries.push({
-        amount: ptAmt,
-        date: new Date(paymentDate),
-        method: method,
-        receiptNo: 'REC-PT-' + Date.now(),
-        type: 'pt'
-      });
-    }
-
     const receivedNew = Math.max(0, Math.min(total, parseFloat(document.getElementById('payAmountReceived')?.value) || total));
     const pendingNew = Math.max(0, total - receivedNew);
+
+    // IMPORTANT: only log what was actually collected. Logging the full
+    // plan/admission/pt breakdown here AND the pending balance when it's
+    // collected later double-counts revenue (charged amount + later
+    // collection both getting summed as "received"). Full payment keeps
+    // the itemised breakdown; a partial payment logs one entry for the
+    // real amount received, and pendingAmount tracks the rest.
+    let entries;
+    if (pendingNew > 0) {
+      entries = [{
+        amount: receivedNew,
+        date: new Date(paymentDate),
+        method: method,
+        receiptNo: 'REC-' + Date.now(),
+        type: 'plan'
+      }];
+    } else {
+      entries = [{
+        amount: planAmt,
+        date: new Date(paymentDate),
+        method: method,
+        receiptNo: 'REC-' + Date.now(),
+        type: 'plan'
+      }];
+      if (admAmt > 0) {
+        entries.push({
+          amount: admAmt,
+          date: new Date(paymentDate),
+          method: method,
+          receiptNo: 'REC-ADM-' + Date.now(),
+          type: 'admission'
+        });
+      }
+      if (ptAmt > 0) {
+        entries.push({
+          amount: ptAmt,
+          date: new Date(paymentDate),
+          method: method,
+          receiptNo: 'REC-PT-' + Date.now(),
+          type: 'pt'
+        });
+      }
+    }
 
     const btn = document.getElementById('confirmPayBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
@@ -2608,27 +2635,35 @@ async function confirmPayment() {
   // that gets pushed separately below (previously double-counted PT).
   const planAmt = Math.max(0, total - (isPt ? ptAmt : 0));
 
-  const payEntry = {
-    amount: planAmt,
-    date: chosenPayDate,
-    method: method,
-    receiptNo: 'REC-' + Date.now(),
-    type: 'plan'
-  };
-
   const btn = document.getElementById('confirmPayBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
 
   const receivedRenew = Math.max(0, Math.min(total, parseFloat(document.getElementById('payAmountReceived')?.value) || total));
   const pendingRenew = Math.max(0, total - receivedRenew);
 
-  try {
-    // Use cache for existing history - avoids extra network round-trip and the
-    // HTML-response bug that occurred because GET /api/members/:id did not exist.
-    const cached = allMembersCache.find(x => (x._id||x.id) === curPayMember.id) || {};
-    const renewHistory = [...(cached.paymentHistory || []), payEntry];
+  // Same fix as the new-member flow: a full payment logs the itemised
+  // plan/PT breakdown; a partial payment logs one entry for the real
+  // amount received (avoids double-counting once the rest is collected
+  // later via "Receive").
+  let renewEntries;
+  if (pendingRenew > 0) {
+    renewEntries = [{
+      amount: receivedRenew,
+      date: chosenPayDate,
+      method: method,
+      receiptNo: 'REC-' + Date.now(),
+      type: 'plan'
+    }];
+  } else {
+    renewEntries = [{
+      amount: planAmt,
+      date: chosenPayDate,
+      method: method,
+      receiptNo: 'REC-' + Date.now(),
+      type: 'plan'
+    }];
     if (isPt && ptAmt > 0) {
-      renewHistory.push({
+      renewEntries.push({
         amount: ptAmt,
         date: chosenPayDate,
         method: method,
@@ -2636,6 +2671,13 @@ async function confirmPayment() {
         type: 'pt'
       });
     }
+  }
+
+  try {
+    // Use cache for existing history - avoids extra network round-trip and the
+    // HTML-response bug that occurred because GET /api/members/:id did not exist.
+    const cached = allMembersCache.find(x => (x._id||x.id) === curPayMember.id) || {};
+    const renewHistory = [...(cached.paymentHistory || []), ...renewEntries];
 
     const res = await fetch(`${API}/${curPayMember.id}`, {
       method: 'PUT', headers: hdrs(),
@@ -2673,7 +2715,7 @@ async function confirmPayment() {
     const renewedName = curPayMember.name, renewedId = curPayMember.id;
     curPayMember = null; curPayMethod = null;
     loadDashboard(); loadPayments(); loadAllMembers();
-    shareReceiptFor(renewedId, renewedName, receivedRenew, pendingRenew, method, payEntry.receiptNo);
+    shareReceiptFor(renewedId, renewedName, receivedRenew, pendingRenew, method, renewEntries[0]?.receiptNo);
   } catch(e) {
     toast(`❌ ${e.message || 'Network error — check connection'}`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '✅ Confirm Payment'; }
