@@ -25,6 +25,15 @@ const DEFAULT_PLANS = [
 let gymPlans   = [...DEFAULT_PLANS];
 let gymDisc    = [];
 let gymCfg     = {};
+
+// The name the logged-in gym owner set for their gym — used in WhatsApp
+// messages instead of the app's own name ("GymPro").
+function getGymName() {
+  try {
+    const u = JSON.parse(localStorage.getItem('user') || '{}');
+    return (u.gymName && u.gymName.trim()) || 'Our Gym';
+  } catch (e) { return 'Our Gym'; }
+}
 let trainerMap = {};
 
 let curPayMember = null;
@@ -463,45 +472,6 @@ function calculateRevenue(members) {
   return revenue;
 }
 
-/* Sums payments whose date falls on a given day (default: today). Used
-   for the "Today's Collection" figures on the Home and Revenue pages. */
-function getRevenueForDate(members, dateStr) {
-  let total = 0, online = 0, cash = 0;
-  members.forEach(m => {
-    (m.paymentHistory || []).forEach(p => {
-      if (!p.date) return;
-      const d = new Date(p.date).toISOString().split('T')[0];
-      if (d !== dateStr) return;
-      const amt = p.amount || 0;
-      total += amt;
-      if ((p.method || 'cash') === 'cash') cash += amt; else online += amt;
-    });
-  });
-  return { total, online, cash };
-}
-
-/* Sums payments within an inclusive date range (both 'YYYY-MM-DD' strings).
-   Used by the Revenue page's From/To filter. */
-function getRevenueInRange(members, fromStr, toStr) {
-  const out = { total: 0, online: 0, cash: 0, plan: 0, admission: 0, pt: 0, entries: [] };
-  members.forEach(m => {
-    (m.paymentHistory || []).forEach(p => {
-      if (!p.date) return;
-      const d = new Date(p.date).toISOString().split('T')[0];
-      if (fromStr && d < fromStr) return;
-      if (toStr && d > toStr) return;
-      const amt = p.amount || 0;
-      out.total += amt;
-      if ((p.method || 'cash') === 'cash') out.cash += amt; else out.online += amt;
-      if (p.type === 'admission') out.admission += amt;
-      else if (p.type === 'pt') out.pt += amt;
-      else out.plan += amt;
-      out.entries.push({ member: m, payment: p });
-    });
-  });
-  return out;
-}
-
 /* ── DASHBOARD ── */
 function renderRevenueDashboard(revenue) {
   const today = new Date();
@@ -547,19 +517,23 @@ function renderDashTable(membersList) {
     return;
   }
   tbody.innerHTML = membersList.map(m => {
-    let expLabel = '\u2014', days = null;
+    let expLabel = '\u2014', expColor = '#8AABAB', urgencyBg = '#F0F5F5', urgencyText = '';
     if (m.expiryDate) {
       const p = m.expiryDate.split('T')[0].split('-');
       const exp = new Date(+p[0], +p[1]-1, +p[2]);
       const today = new Date(); today.setHours(0,0,0,0);
-      days = Math.ceil((exp - today) / 86400000);
+      const days = Math.ceil((exp - today) / 86400000);
       expLabel = exp.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'});
-    }
-    // Urgency color: red = 3 days or less (incl. overdue), orange = 4-7 days, green = anything beyond
-    let urgency = { clr:'#27AE60', bg:'#EAFAF1', label:'On Track' };
-    if (days !== null) {
-      if (days <= 3)      urgency = { clr:'#E74C3C', bg:'#FDEDEC', label: days < 0 ? 'Overdue' : days === 0 ? 'Expires Today' : 'Expiring Soon' };
-      else if (days <= 7) urgency = { clr:'#F39C12', bg:'#FEF6E9', label:'Expiring Soon' };
+      if (days <= 3) {
+        expColor = '#E74C3C'; urgencyBg = '#FEECEB';
+        urgencyText = days < 0 ? `Expired ${Math.abs(days)}d ago` : days === 0 ? 'Expires today' : `${days}d left`;
+      } else if (days <= 7) {
+        expColor = '#F39C12'; urgencyBg = '#FEF6E7';
+        urgencyText = `${days}d left`;
+      } else {
+        expColor = '#27AE60'; urgencyBg = '#E8F8EF';
+        urgencyText = `${days}d left`;
+      }
     }
     const stClr = {Active:'#27AE60',Trial:'#2980B9',Inactive:'#95A5A6',Expired:'#E74C3C'};
     const stBg = {Active:'#E8F8EF',Trial:'#E3F2FD',Inactive:'#F3F4F6',Expired:'#FEECEB'};
@@ -568,47 +542,49 @@ function renderDashTable(membersList) {
     const safePhone_d = esc(m.phone||'');
     const safeId_d = esc(m._id);
     const safeName_d = esc(m.name||'');
-    return `<div style="background:#fff;border-radius:16px;margin-bottom:12px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.06),0 1px 3px rgba(0,0,0,.04);border-left:5px solid ${urgency.clr}">
-      <!-- Top info row -->
-      <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 14px 10px" onclick="openEditMember('${safeId_d}')">
-        <div style="flex-shrink:0">${avImgDash(m)}</div>
-        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
-          <div style="display:flex;align-items:center;gap:6px">
+    const dueAmt = Number(m.pendingAmount) || 0;
+    return `<div style="border-radius:16px;overflow:hidden;background:#fff;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.06);border-left:6px solid ${expColor}">
+      <!-- Top info row: full-width, photo + details + expiry -->
+      <div style="display:flex;align-items:stretch;gap:0;padding:0">
+        <!-- Photo -->
+        <div style="padding:12px 10px 0 12px;flex-shrink:0" onclick="openEditMember('${safeId_d}')">
+          ${avImgDash(m)}
+        </div>
+        <!-- Details -->
+        <div style="flex:1;min-width:0;padding:10px 10px 8px 0;display:flex;flex-direction:column;justify-content:center;gap:3px" onclick="openEditMember('${safeId_d}')">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:1px">
             <span style="font-weight:800;font-size:1rem;color:#1A2E2E;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${safeName_d}</span>
-            <span style="font-size:.6rem;font-weight:800;color:#fff;background:#1A8C8C;padding:2px 7px;border-radius:8px;white-space:nowrap;flex-shrink:0">ID #${m.memberNo||''}</span>
+            <span style="font-size:.6rem;font-weight:800;color:#fff;background:#1A8C8C;padding:1px 6px;border-radius:7px;white-space:nowrap;flex-shrink:0">ID #${m.memberNo||''}</span>
           </div>
           <div style="font-size:.78rem;color:#4A6464;font-weight:600">📱 +91 ${safePhone_d}</div>
           <div style="font-size:.72rem;color:#8AABAB;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.plan||'')}</div>
+          <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:2px">
+            <span style="background:${urgencyBg};color:${expColor};padding:2px 8px;border-radius:14px;font-size:.65rem;font-weight:800;white-space:nowrap">⏰ ${urgencyText || expLabel}</span>
+            <span style="font-size:.7rem;font-weight:700;color:#4A6464">${expLabel}</span>
+            <span style="background:${sb};color:${sc};padding:2px 8px;border-radius:14px;font-size:.62rem;font-weight:800">${esc(m.status||'')}</span>
+            ${dueAmt > 0 ? `<span style="background:#FEECEB;color:#E74C3C;padding:2px 8px;border-radius:14px;font-size:.62rem;font-weight:800">💰 Due ₹${dueAmt.toLocaleString('en-IN')}</span>` : ''}
+          </div>
         </div>
-        <span style="background:${sb};color:${sc};padding:3px 9px;border-radius:12px;font-size:.62rem;font-weight:800;white-space:nowrap;flex-shrink:0">${esc(m.status||'')}</span>
-      </div>
-      <!-- Urgency highlight bar: this is the primary "when do I need to act" signal -->
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 14px 12px;padding:8px 12px;border-radius:12px;background:${urgency.bg}">
-        <div style="display:flex;align-items:center;gap:8px;min-width:0">
-          <span style="width:9px;height:9px;border-radius:50%;background:${urgency.clr};flex-shrink:0"></span>
-          <span style="font-size:.8rem;font-weight:800;color:#1A2E2E;white-space:nowrap">${expLabel}</span>
-        </div>
-        <span style="font-size:.65rem;font-weight:800;color:${urgency.clr};white-space:nowrap">${urgency.label}</span>
       </div>
       <!-- Action bar: 6 buttons full width -->
       <div style="display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid #F0F5F5">
-        <button onclick="dialPhone('${safePhone_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:9px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
-          <span style="font-size:1rem">📞</span><span style="font-size:.56rem;font-weight:700;color:#8AABAB">Call</span>
+        <button onclick="dialPhone('${safePhone_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:8px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
+          <span style="font-size:.95rem">📞</span><span style="font-size:.5rem;font-weight:700;color:#8AABAB">Call</span>
         </button>
-        <button onclick="openWhatsApp('${safePhone_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:9px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
-          <span style="font-size:1rem">💬</span><span style="font-size:.56rem;font-weight:700;color:#8AABAB">WhatsApp</span>
+        <button onclick="openWhatsApp('${safePhone_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:8px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
+          <span style="font-size:.95rem">💬</span><span style="font-size:.5rem;font-weight:700;color:#8AABAB">WhatsApp</span>
         </button>
-        <button onclick="openPaymentForById('${safeId_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:9px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
-          <span style="font-size:1rem">🔄</span><span style="font-size:.56rem;font-weight:700;color:#8AABAB">Renew</span>
+        <button onclick="openPaymentForById('${safeId_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:8px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
+          <span style="font-size:.95rem">🔄</span><span style="font-size:.5rem;font-weight:700;color:#8AABAB">Renew</span>
         </button>
-        <button onclick="sendPaymentReminder('${safeId_d}','${safePhone_d}','${safeName_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:9px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
-          <span style="font-size:1rem">💰</span><span style="font-size:.56rem;font-weight:700;color:#8AABAB">Reminder</span>
+        <button onclick="sendPaymentReminder('${safeId_d}','${safePhone_d}','${safeName_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:8px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
+          <span style="font-size:.95rem">💰</span><span style="font-size:.5rem;font-weight:700;color:#8AABAB">Reminder</span>
         </button>
-        <button onclick="openEditMember('${safeId_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:9px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
-          <span style="font-size:1rem">✏️</span><span style="font-size:.56rem;font-weight:700;color:#8AABAB">Edit</span>
+        <button onclick="openEditMember('${safeId_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:8px 2px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5">
+          <span style="font-size:.95rem">✏️</span><span style="font-size:.5rem;font-weight:700;color:#8AABAB">Edit</span>
         </button>
-        <button onclick="delMember('${safeId_d}','${safeName_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:9px 2px;border:none;background:#FFF5F5;cursor:pointer">
-          <span style="font-size:1rem">🗑️</span><span style="font-size:.56rem;font-weight:700;color:#E74C3C">Delete</span>
+        <button onclick="delMember('${safeId_d}','${safeName_d}')" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:8px 2px;border:none;background:#FFF0F0;cursor:pointer">
+          <span style="font-size:.95rem">🗑️</span><span style="font-size:.5rem;font-weight:700;color:#E74C3C">Delete</span>
         </button>
       </div>
     </div>`;
@@ -669,11 +645,6 @@ async function loadDashboard() {
 
     const revenue = calculateRevenue(members);
     renderRevenueDashboard(revenue);
-
-    const todayStr = new Date().toISOString().split('T')[0];
-    const todayRev = getRevenueForDate(members, todayStr);
-    const revTodayEl = document.getElementById('revTodayTotal');
-    if (revTodayEl) revTodayEl.textContent = `₹${todayRev.total.toLocaleString('en-IN')}`;
 
     const today = new Date();
     today.setHours(0,0,0,0);
@@ -1048,19 +1019,25 @@ document.getElementById('addMemberForm')?.addEventListener('submit', async e => 
       toast(`${added.name} added!`,'success');
       loadDashboard();
       loadAllMembers();
-      
-      openPaymentFor({
-        id: added._id,
-        name: added.name,
-        plan: added.plan,
-        expiryDate: added.expiryDate,
-        planPrice: added.planPrice,
-        ptEnabled: added.ptEnabled,
-        ptFee: added.ptFee,
-        admissionFee: added.admissionFee,
-        admissionWaived: added.admissionWaived,
-        paymentDate: paymentDate
-      }, true);
+
+      // Trial members are added just for identification — no payment expected,
+      // so skip forcing the payment modal open for them.
+      if (data.status === 'Trial') {
+        // done — nothing further needed for a trial signup
+      } else {
+        openPaymentFor({
+          id: added._id,
+          name: added.name,
+          plan: added.plan,
+          expiryDate: added.expiryDate,
+          planPrice: added.planPrice,
+          ptEnabled: added.ptEnabled,
+          ptFee: added.ptFee,
+          admissionFee: added.admissionFee,
+          admissionWaived: added.admissionWaived,
+          paymentDate: paymentDate
+        }, true);
+      }
     }else{
       const err=await res.json(); toast(err.error||'Could not add member','error');
     }
@@ -1070,10 +1047,7 @@ document.getElementById('addMemberForm')?.addEventListener('submit', async e => 
 
 /* ── PHOTO COMPRESSION ──────────────────────────────────────────
    Every photo captured or uploaded is resized + re-encoded as a small
-   JPEG before it's ever stored in photoData/ePhotoData. This is what
-   keeps each member record small (previously: full-resolution camera
-   photos, several MB each, were stored raw as base64).
-   Target: ~20-24 KB per photo. */
+   JPEG before it's ever stored in photoData/ePhotoData. Target: ~20-24 KB. */
 function compressPhotoDataUrl(dataUrl, maxDim = 320, targetBytes = 24000) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -1084,11 +1058,9 @@ function compressPhotoDataUrl(dataUrl, maxDim = 320, targetBytes = 24000) {
       } else if (height >= width && height > maxDim) {
         width = Math.round(width * (maxDim / height)); height = maxDim;
       }
-
       const c = document.createElement('canvas');
       c.width = width; c.height = height;
       c.getContext('2d').drawImage(img, 0, 0, width, height);
-
       let quality = 0.7;
       let out = c.toDataURL('image/jpeg', quality);
       let bytes = Math.round(out.length * 0.75);
@@ -1099,8 +1071,6 @@ function compressPhotoDataUrl(dataUrl, maxDim = 320, targetBytes = 24000) {
         bytes = Math.round(out.length * 0.75);
         attempts++;
       }
-
-      // Still too big even at floor quality? Shrink dimensions once more.
       if (bytes > targetBytes && (width > 160 || height > 160)) {
         const c2 = document.createElement('canvas');
         c2.width = Math.round(width * 0.7);
@@ -1108,10 +1078,9 @@ function compressPhotoDataUrl(dataUrl, maxDim = 320, targetBytes = 24000) {
         c2.getContext('2d').drawImage(c, 0, 0, c2.width, c2.height);
         out = c2.toDataURL('image/jpeg', 0.6);
       }
-
       resolve(out);
     };
-    img.onerror = () => resolve(dataUrl); // fallback: keep original if decode fails
+    img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;
   });
 }
@@ -2002,23 +1971,6 @@ async function loadPayments() {
 /* ── REVENUE PAGE ── */
 let _revenueSearchQuery = '';
 
-let _revenueFromDate = '';
-let _revenueToDate = '';
-
-function applyRevenueDateFilter() {
-  _revenueFromDate = document.getElementById('revenueFromDate')?.value || '';
-  _revenueToDate = document.getElementById('revenueToDate')?.value || '';
-  loadRevenuePage();
-}
-
-function clearRevenueDateFilter() {
-  _revenueFromDate = '';
-  _revenueToDate = '';
-  const f = document.getElementById('revenueFromDate'); if (f) f.value = '';
-  const t = document.getElementById('revenueToDate'); if (t) t.value = '';
-  loadRevenuePage();
-}
-
 function filterRevenue() {
   _revenueSearchQuery = (document.getElementById('revenueSearch')?.value || '').toLowerCase().trim();
   loadRevenuePage();
@@ -2035,38 +1987,7 @@ async function loadRevenuePage() {
       ? allMembers.filter(m => (m.name||'').toLowerCase().includes(_revenueSearchQuery) || String(m.memberNo||'').includes(_revenueSearchQuery))
       : allMembers;
     const revenue = calculateRevenue(members);
-
-    // Custom date-range filter (From/To), independent of the fixed 3-month view below
-    let rangeHtml = '';
-    if (_revenueFromDate || _revenueToDate) {
-      const range = getRevenueInRange(members, _revenueFromDate, _revenueToDate);
-      const label = _revenueFromDate && _revenueToDate
-        ? `${new Date(_revenueFromDate).toLocaleDateString('en-IN')} — ${new Date(_revenueToDate).toLocaleDateString('en-IN')}`
-        : _revenueFromDate ? `From ${new Date(_revenueFromDate).toLocaleDateString('en-IN')}`
-        : `Up to ${new Date(_revenueToDate).toLocaleDateString('en-IN')}`;
-      rangeHtml = `
-      <div style="background:#F0F5F5;border:2px solid #1A8C8C;border-radius:14px;padding:14px;margin-bottom:16px">
-        <div style="font-size:.65rem;font-weight:800;color:#1A8C8C;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📅 ${label}</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;text-align:center">
-          <div>
-            <div style="font-size:.6rem;color:#8AABAB;font-weight:700">Total</div>
-            <div style="font-size:1.15rem;font-weight:800;color:#1A2E2E">₹${range.total.toLocaleString('en-IN')}</div>
-          </div>
-          <div>
-            <div style="font-size:.6rem;color:#8AABAB;font-weight:700">📱 Online</div>
-            <div style="font-size:1rem;font-weight:800;color:#1A2E2E">₹${range.online.toLocaleString('en-IN')}</div>
-          </div>
-          <div>
-            <div style="font-size:.6rem;color:#8AABAB;font-weight:700">💵 Cash</div>
-            <div style="font-size:1rem;font-weight:800;color:#1A2E2E">₹${range.cash.toLocaleString('en-IN')}</div>
-          </div>
-        </div>
-        <div style="font-size:.62rem;color:#4A6464;font-weight:600;margin-top:8px;text-align:center">
-          Plan: ₹${range.plan.toLocaleString('en-IN')} | PT: ₹${range.pt.toLocaleString('en-IN')} | Admission: ₹${range.admission.toLocaleString('en-IN')} · ${range.entries.length} payment${range.entries.length===1?'':'s'}
-        </div>
-      </div>`;
-    }
-
+    
     const today = new Date();
     const monthLabels = [];
     for (let i = 0; i < 3; i++) {
@@ -2080,7 +2001,6 @@ async function loadRevenuePage() {
     }
 
     let html = `
-      ${rangeHtml}
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
         ${monthKeys.map((key, idx) => {
           const data = revenue.months[key] || { total: 0, plan: 0, admission: 0, pt: 0, online: 0, cash: 0 };
@@ -2305,6 +2225,21 @@ function selectPayMethod(method) {
   }
 }
 
+function updatePendingDisplay(total) {
+  const input = document.getElementById('payAmountReceived');
+  const row = document.getElementById('pendingDisplayRow');
+  if (!input || !row) return;
+  const received = Math.max(0, Math.min(total, parseFloat(input.value) || 0));
+  const pending = Math.max(0, total - received);
+  if (pending > 0) {
+    row.innerHTML = `⚠️ <strong>₹${pending.toLocaleString('en-IN')} pending</strong> — will be tracked as a due balance on this member`;
+    row.style.color = '#E74C3C';
+  } else {
+    row.textContent = '✅ Fully paid — no pending balance';
+    row.style.color = '#27AE60';
+  }
+}
+
 function recalcPayment() {
   if (!curPayMember) return;
   const isNew = curPayMember.isNew;
@@ -2371,6 +2306,16 @@ function recalcPayment() {
   rows += `<div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1.5px solid var(--border);margin-top:6px">
     <span style="font-weight:800;font-size:.88rem">Total</span>
     <strong style="color:var(--g);font-size:1.05rem">₹${total.toLocaleString('en-IN')}</strong>
+  </div>`;
+
+  // Amount actually received now — lets staff record a partial/half payment.
+  // Anything less than "Total" becomes a tracked pending balance on the member.
+  rows += `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">
+    <label style="font-size:.7rem;font-weight:800;color:#1A8C8C;display:block;margin-bottom:5px">💰 Amount Received Now</label>
+    <input type="number" id="payAmountReceived" value="${total}" min="0" max="${total}" step="1"
+      oninput="updatePendingDisplay(${total})"
+      style="width:100%;padding:9px 10px;border:2px solid #E0ECEC;border-radius:10px;font-family:inherit;font-size:.9rem;font-weight:700">
+    <div id="pendingDisplayRow" style="font-size:.75rem;font-weight:700;color:#27AE60;margin-top:5px">✅ Fully paid — no pending balance</div>
   </div>`;
 
   const infoEl = document.getElementById('payInfo');
@@ -2453,8 +2398,12 @@ async function confirmPayment() {
       });
     }
 
+    const receivedNew = Math.max(0, Math.min(total, parseFloat(document.getElementById('payAmountReceived')?.value) || total));
+    const pendingNew = Math.max(0, total - receivedNew);
+
     const btn = document.getElementById('confirmPayBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
+    let addedMemberForReceipt = null;
     try {
       await fetch(`${API}/${curPayMember.id}`, {
         method: 'PUT', headers: hdrs(),
@@ -2462,11 +2411,15 @@ async function confirmPayment() {
           paymentHistory: entries,
           lastPaymentDate: new Date(paymentDate),
           lastPaymentMethod: method,
-          lastPaymentAmount: total
+          lastPaymentAmount: receivedNew,
+          pendingAmount: pendingNew
         })
       });
       const methodLabel = { upi:'📱 UPI', cash:'💵 Cash', card:'💳 Card' }[method] || method;
-      toast(`✅ Member added — ${methodLabel} payment confirmed!`, 'success');
+      toast(pendingNew > 0
+        ? `✅ Member added — ${methodLabel} ₹${receivedNew.toLocaleString('en-IN')} received, ₹${pendingNew.toLocaleString('en-IN')} pending`
+        : `✅ Member added — ${methodLabel} payment confirmed!`, 'success');
+      addedMemberForReceipt = { name: curPayMember.name, id: curPayMember.id };
     } catch(e) {
       toast('Member added but payment record failed', 'error');
     }
@@ -2474,6 +2427,7 @@ async function confirmPayment() {
     curPayMember = null; curPayMethod = null;
     loadDashboard(); loadAllMembers();
     if (btn) { btn.disabled = false; btn.textContent = '✅ Confirm Payment'; }
+    if (addedMemberForReceipt) shareReceiptFor(addedMemberForReceipt.id, addedMemberForReceipt.name, receivedNew, pendingNew, method, entries[0]?.receiptNo);
     return;
   }
 
@@ -2517,6 +2471,9 @@ async function confirmPayment() {
   const btn = document.getElementById('confirmPayBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
 
+  const receivedRenew = Math.max(0, Math.min(total, parseFloat(document.getElementById('payAmountReceived')?.value) || total));
+  const pendingRenew = Math.max(0, total - receivedRenew);
+
   try {
     // Use cache for existing history - avoids extra network round-trip and the
     // HTML-response bug that occurred because GET /api/members/:id did not exist.
@@ -2547,7 +2504,8 @@ async function confirmPayment() {
         status: 'Active',
         lastPaymentDate: chosenPayDate,
         lastPaymentMethod: method,
-        lastPaymentAmount: total,
+        lastPaymentAmount: receivedRenew,
+        pendingAmount: pendingRenew,
         paymentHistory: renewHistory
       })
     });
@@ -2560,10 +2518,14 @@ async function confirmPayment() {
 
     const methodLabel = { upi:'📱 UPI', cash:'💵 Cash', card:'💳 Card' }[method] || method;
     const expiryDisplay = new Date(newExpiry).toLocaleDateString('en-IN');
-    toast(`✅ ${methodLabel} — Renewed until ${expiryDisplay}`, 'success');
+    toast(pendingRenew > 0
+      ? `✅ Renewed until ${expiryDisplay} — ₹${pendingRenew.toLocaleString('en-IN')} still pending`
+      : `✅ ${methodLabel} — Renewed until ${expiryDisplay}`, 'success');
     closeModal('paymentModal');
+    const renewedName = curPayMember.name, renewedId = curPayMember.id;
     curPayMember = null; curPayMethod = null;
     loadDashboard(); loadPayments(); loadAllMembers();
+    shareReceiptFor(renewedId, renewedName, receivedRenew, pendingRenew, method, payEntry.receiptNo);
   } catch(e) {
     toast(`❌ ${e.message || 'Network error — check connection'}`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '✅ Confirm Payment'; }
@@ -2741,7 +2703,7 @@ async function sendAttendanceReport(memberId, phone, name) {
     const daysStr = presentDays.sort((a,b)=>a-b).join(', ') || 'No records yet';
 
     const msg =
-`*🏋️ GymPro Attendance Report*
+`*🏋️ ${getGymName()} Attendance Report*
 Member: *${name}*
 Month: *${monthName}*
 
@@ -2750,7 +2712,7 @@ Month: *${monthName}*
 ❌ Absent: *${absent >= 0 ? absent : 0} day${absent!==1?'s':''}*
 
 Keep pushing! 💪
-- GymPro Management`;
+- ${getGymName()} Management`;
 
     const clean = String(phone).replace(/[^0-9]/g, '');
     const num = clean.startsWith('91') ? clean : '91' + clean;
@@ -2765,6 +2727,56 @@ Keep pushing! 💪
 /* ══════════════════════════════════════════════════════════════
    PAYMENT REMINDER  -  renewal reminder via WhatsApp
 ══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+   RECEIPT SHARING  -  sends a payment receipt to the member via WhatsApp
+══════════════════════════════════════════════════════════════ */
+function shareReceiptFor(memberId, name, amountReceived, pendingAmount, method, receiptNo) {
+  try {
+    const m = allMembersCache.find(x => (x._id||x.id) === memberId);
+    const phone = m?.phone;
+    if (!phone) return; // no phone on file, skip silently
+    const methodLabel = { upi:'📱 UPI', cash:'💵 Cash', card:'💳 Card' }[method] || (method || 'Cash');
+    const dateStr = new Date().toLocaleDateString('en-IN');
+
+    let msg =
+`🧾 *${getGymName()} — Payment Receipt*
+
+Hi *${name}*,
+Thank you for your payment!
+
+Receipt No: *${receiptNo || 'REC-' + Date.now()}*
+Date: *${dateStr}*
+Amount Received: *₹${Number(amountReceived).toLocaleString('en-IN')}*
+Method: *${methodLabel}*`;
+
+    if (pendingAmount > 0) {
+      msg += `\n\n⚠️ *Pending Balance: ₹${Number(pendingAmount).toLocaleString('en-IN')}*\nPlease clear this at your earliest convenience.`;
+    } else {
+      msg += `\n\n✅ *Fully Paid*`;
+    }
+
+    msg += `\n\n- ${getGymName()} Management`;
+
+    const clean = String(phone).replace(/[^0-9]/g, '');
+    const num = clean.startsWith('91') ? clean : '91' + clean;
+    window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, '_blank');
+  } catch (e) {
+    console.error('Receipt share failed', e);
+  }
+}
+
+/* Manually re-share the receipt for a member's most recent payment
+   (e.g. from a "📄 Receipt" button on their card). */
+function shareLastReceipt(memberId) {
+  const m = allMembersCache.find(x => (x._id||x.id) === memberId);
+  if (!m || !m.paymentHistory || !m.paymentHistory.length) {
+    toast('No payment history to share yet', 'error');
+    return;
+  }
+  const last = [...m.paymentHistory].sort((a,b) => new Date(b.date) - new Date(a.date))[0];
+  shareReceiptFor(memberId, m.name, last.amount, m.pendingAmount || 0, last.method, last.receiptNo);
+}
+
 async function sendPaymentReminder(memberId, phone, name) {
   try {
     const m = allMembersCache.find(x => (x._id||x.id) === memberId) || {};
@@ -2783,7 +2795,7 @@ async function sendPaymentReminder(memberId, phone, name) {
     }
 
     const msg =
-`🏋️ *GymPro Membership Reminder*
+`🏋️ *${getGymName()} Membership Reminder*
 
 Hi *${name}*,
 ${urgencyLine}
@@ -2794,7 +2806,7 @@ ${urgencyLine}
 Please renew your membership to continue your fitness journey without interruption. 💪
 
 Contact us to renew today!
-- GymPro Management`;
+- ${getGymName()} Management`;
 
     const clean = String(phone).replace(/[^0-9]/g, '');
     const num = clean.startsWith('91') ? clean : '91' + clean;
