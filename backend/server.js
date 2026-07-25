@@ -44,7 +44,12 @@ async function start() {
 
     // Creates tables if they don't exist yet. Safe to leave on Hostinger;
     // it will NOT drop or overwrite existing tables/data.
-    await sequelize.sync();
+    // { alter: true } lets sync() add new columns to EXISTING tables too
+    // (plain sync() only creates missing tables — it silently skips new
+    // fields added to a model later, which caused the "Unknown column"
+    // 500 errors after pendingAmount was added). Safe for additive changes;
+    // it will not drop existing columns or data.
+    await sequelize.sync({ alter: true });
     console.log('✅ Tables synced');
 
     app.listen(PORT, () => {
