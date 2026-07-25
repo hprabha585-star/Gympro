@@ -737,9 +737,12 @@ function _renderMemberCard(m, idx) {
           </div>
           <div style="font-size:.75rem;font-weight:800;color:#27AE60">Paid: ₹${(m.lastPaymentAmount||m.planPrice||0).toLocaleString('en-IN')}</div>
         </div>
-        <div style="font-size:.72rem;color:#8AABAB;margin-top:2px">
-          <span style="font-weight:600">Payment Date: </span>
-          <span style="font-weight:700;color:#4A6464">${m.lastPaymentDate ? new Date(m.lastPaymentDate).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—'}</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;margin-top:2px">
+          <div style="font-size:.72rem;color:#8AABAB">
+            <span style="font-weight:600">Payment Date: </span>
+            <span style="font-weight:700;color:#4A6464">${m.lastPaymentDate ? new Date(m.lastPaymentDate).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—'}</span>
+          </div>
+          ${Number(m.pendingAmount) > 0 ? `<span style="font-size:.68rem;font-weight:800;color:#E74C3C;background:#FEECEB;padding:2px 8px;border-radius:10px;white-space:nowrap">⚠️ Due ₹${Number(m.pendingAmount).toLocaleString('en-IN')}</span>` : ''}
         </div>
       </div>
       
@@ -751,7 +754,8 @@ function _renderMemberCard(m, idx) {
       <button onclick="openMemberAttendance('${safeId}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:58px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">📅</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Attendance</span></button>
       <button onclick="openPaymentFor({id:'${safeId}',name:'${safeName}',plan:'${safePlan}',expiryDate:'${m.expiryDate||''}',planPrice:${m.planPrice||0},ptEnabled:${!!m.ptEnabled},ptFee:${m.ptFee||0},admissionFee:${m.admissionFee||0},admissionWaived:${!!m.admissionWaived}})" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:62px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">🔄</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Renew Plan</span></button>
       <button onclick="sendAttendanceReport('${safeId}','${esc(m.phone||'')}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">📊</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Attend</span></button>
-      <button onclick="sendPaymentReminder('${safeId}','${esc(m.phone||'')}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;flex-shrink:0"><span style="font-size:1rem">💰</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Reminder</span></button>
+      <button onclick="sendPaymentReminder('${safeId}','${esc(m.phone||'')}','${safeName}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-right:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">💰</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Reminder</span></button>
+      <button onclick="shareLastReceipt('${safeId}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:5px 8px;border:none;background:transparent;cursor:pointer;flex-shrink:0"><span style="font-size:1rem">🧾</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Receipt</span></button>
       <button onclick="openEditMember('${safeId}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:48px;padding:5px 8px;border:none;background:transparent;cursor:pointer;border-left:1px solid #F0F5F5;flex-shrink:0"><span style="font-size:1rem">✏️</span><span style="font-size:.52rem;font-weight:700;color:#8AABAB">Edit</span></button>
       <button onclick="delMember('${safeId}','${safeName.replace(/'/g,"\\'")}')" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:48px;padding:5px 8px;border:none;background:#FFF0F0;cursor:pointer;border-left:1px solid #FECDD5;flex-shrink:0"><span style="font-size:1rem">🗑️</span><span style="font-size:.52rem;font-weight:700;color:#E74C3C">Delete</span></button>
     </div>
@@ -2802,7 +2806,7 @@ ${urgencyLine}
 
 📋 Plan: *${plan}*
 📅 Expiry: *${expDate}*
-
+${Number(m.pendingAmount) > 0 ? `💰 Pending Balance: *₹${Number(m.pendingAmount).toLocaleString('en-IN')}*\n` : ''}
 Please renew your membership to continue your fitness journey without interruption. 💪
 
 Contact us to renew today!
