@@ -1,0 +1,233 @@
+const express = require('express');
+const router = express.Router();
+const { Member, Attendance, User, Gym } = require('../models');
+const { Op } = require('sequelize');
+const authMiddleware = require('../middleware/auth');
+
+// DATE FIX: the server runs in UTC, so new Date().toISOString().split('T')[0]
+// returned YESTERDAY for Indian users between 12:00am and 5:30am IST.
+// Compute the calendar date in the gym's timezone instead.
+const GYM_TZ = process.env.GYM_TIMEZONE || 'Asia/Kolkata';
+function todayStr(offsetDays = 0) {
+  const d = new Date(Date.now() + offsetDays * 86400000);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: GYM_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+
+// Generate GYM QR code (for the gym entrance)
+router.get('/gym-qr', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const gymId = req.user.gymId || userId;
+
+    let gymName = 'GymPro';
+
+    // FIX: staff tokens carry gymId = the OWNER's user id, so the old
+    // "gymId === userId ? User : Gym" test sent staff to the Gym table and
+    // returned 404 (that's why gym-qr.html needed a client-side fallback).
+    // Look in Users first (primary gyms), then the Gym table (extra gyms).
+    const ownerRow = await User.findByPk(gymId);
+    if (ownerRow && ownerRow.role === 'admin') {
+      gymName = ownerRow.gymName || ownerRow.name || 'GymPro';
+    } else {
+      const gym = await Gym.findByPk(gymId);
+      if (!gym) return res.status(404).json({ error: 'Gym not found' });
+      gymName = gym.name;
+    }
+
+    const qrData = {
+      gymId: gymId,
+      gymName: gymName,
+      type: 'gym_checkin',
+      timestamp: Date.now()
+    };
+
+    const encodedData = Buffer.from(JSON.stringify(qrData)).toString('base64');
+
+    // Base URL: set PUBLIC_URL in .env (e.g. https://yourdomain.com); falls back to the request's own host.
+    const baseUrl = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+    const checkinUrl = `${baseUrl}/member-checkin.html?qr=${encodeURIComponent(encodedData)}`;
+
+    res.json({
+      qrString: checkinUrl,
+      qrData: encodedData,
+      gymName: gymName,
+      gymId: gymId,
+      checkinUrl
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Member self check-in (public)
+router.post('/member-checkin', async (req, res) => {
+  try {
+    const { qrData, memberId, phoneNumber } = req.body;
+    if (!qrData) return res.status(400).json({ error: 'QR data required' });
+
+    let decoded;
+    try {
+      decoded = JSON.parse(Buffer.from(qrData, 'base64').toString());
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid QR code' });
+    }
+
+    if (decoded.type !== 'gym_checkin') {
+      return res.status(400).json({ error: 'Invalid gym QR code' });
+    }
+
+    const { gymId } = decoded;
+
+    let member;
+    if (memberId) {
+      // SECURITY FIX: only match the public Member ID (memberNo). The old
+      // fallback to the internal row id let anyone type 1,2,3... and check
+      // in other people.
+      member = await Member.findOne({ where: { memberNo: parseInt(memberId, 10) || -1, userId: gymId, isDeleted: false } });
+    } else if (phoneNumber) {
+      const cleanPhone = String(phoneNumber).replace(/[^0-9]/g, '');
+      member = await Member.findOne({ where: { phone: cleanPhone, userId: gymId, isDeleted: false } });
+    }
+
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found. Please check your Member ID or Phone number.' });
+    }
+
+    if (member.status !== 'Active' && member.status !== 'Trial') {
+      return res.status(403).json({ error: 'Membership is not active. Please contact gym staff.' });
+    }
+
+    if (member.expiryDate) {
+      // DATE FIX: compare calendar days in the gym's timezone (the old code
+      // compared server-local midnights, so on IST mornings an expired
+      // member could still check in).
+      const expStr = new Date(member.expiryDate).toISOString().slice(0, 10);
+      if (expStr < todayStr()) {
+        const [y, mo, d] = expStr.split('-');
+        return res.status(403).json({ error: `Membership expired on ${d}/${mo}/${y}. Please renew.` });
+      }
+    }
+
+    const today = todayStr();
+
+    const existingAttendance = await Attendance.findOne({ where: { userId: gymId, memberId: member.id, date: today } });
+
+    if (existingAttendance && existingAttendance.status === 'Present') {
+      return res.json({
+        success: true,
+        alreadyChecked: true,
+        message: `Welcome back ${member.name}! You already checked in today.`,
+        memberName: member.name,
+        memberId: member.id,
+        checkinTime: existingAttendance.markedAt
+      });
+    }
+
+    let attendance;
+    if (existingAttendance) {
+      existingAttendance.status = 'Present';
+      existingAttendance.markedAt = new Date();
+      existingAttendance.checkinMethod = 'qr_member';
+      attendance = await existingAttendance.save();
+    } else {
+      attendance = await Attendance.create({
+        userId: gymId, memberId: member.id, date: today,
+        status: 'Present', markedAt: new Date(), checkinMethod: 'qr_member'
+      });
+    }
+
+    const weekAgo = todayStr(-7);
+    const lastWeekAttendances = await Attendance.findAll({
+      where: { userId: gymId, memberId: member.id, date: { [Op.gte]: weekAgo } }
+    });
+    const weeklyCount = lastWeekAttendances.filter(a => a.status === 'Present').length;
+
+    res.json({
+      success: true,
+      message: `✅ Welcome ${member.name}! Your attendance has been marked for today.`,
+      memberName: member.name,
+      memberId: member.id,
+      memberPlan: member.plan,
+      expiryDate: member.expiryDate,
+      weeklyAttendance: weeklyCount,
+      checkinTime: new Date()
+    });
+  } catch (err) {
+    console.error('Member check-in error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get member's own attendance history
+router.post('/my-attendance', async (req, res) => {
+  try {
+    const { gymQRData, memberId, phoneNumber } = req.body;
+    if (!gymQRData) return res.status(400).json({ error: 'Gym QR data required' });
+
+    const decoded = JSON.parse(Buffer.from(gymQRData, 'base64').toString());
+    if (decoded.type !== 'gym_checkin') return res.status(400).json({ error: 'Invalid gym QR code' });
+
+    const { gymId } = decoded;
+
+    let member;
+    if (memberId) {
+      // SECURITY FIX: only match the public Member ID (memberNo). The old
+      // fallback to the internal row id let anyone type 1,2,3... and check
+      // in other people.
+      member = await Member.findOne({ where: { memberNo: parseInt(memberId, 10) || -1, userId: gymId, isDeleted: false } });
+    } else if (phoneNumber) {
+      const cleanPhone = String(phoneNumber).replace(/[^0-9]/g, '');
+      member = await Member.findOne({ where: { phone: cleanPhone, userId: gymId, isDeleted: false } });
+    }
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    const startDateStr = todayStr(-30);
+
+    const attendances = await Attendance.findAll({
+      where: { userId: gymId, memberId: member.id, date: { [Op.gte]: startDateStr } },
+      order: [['date', 'DESC']]
+    });
+
+    const history = attendances.map(a => ({ date: a.date, status: a.status, checkinMethod: a.checkinMethod }));
+
+    res.json({
+      memberName: member.name,
+      memberPlan: member.plan,
+      expiryDate: member.expiryDate,
+      totalPresent: attendances.filter(a => a.status === 'Present').length,
+      history
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: today's QR check-ins
+router.get('/today-checkins', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.gymId || req.user.userId;
+    const today = todayStr();
+
+    const checkins = await Attendance.findAll({
+      where: { userId, date: today, status: 'Present' },
+      include: [{ model: Member, as: 'member', attributes: ['id', 'name', 'phone', 'plan'] }]
+    });
+
+    const members = checkins
+      .filter(c => c.member)
+      .map(c => ({
+        memberId: c.member.id,
+        name: c.member.name,
+        phone: c.member.phone,
+        plan: c.member.plan,
+        checkinTime: c.markedAt,
+        method: c.checkinMethod
+      }));
+
+    res.json({ date: today, totalCheckins: members.length, members });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;

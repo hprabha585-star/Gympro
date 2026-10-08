@@ -1,0 +1,441 @@
+const express = require('express');
+const router = express.Router();
+const { Op } = require('sequelize');
+const { Member, Attendance, User, Gym } = require('../models');
+const authMiddleware = require('../middleware/auth');
+
+router.use(authMiddleware);
+
+// DATE FIX: the server runs in UTC, so new Date().toISOString().split('T')[0]
+// returned YESTERDAY for Indian users between 12:00am and 5:30am IST.
+// Compute the calendar date in the gym's timezone instead.
+const GYM_TZ = process.env.GYM_TIMEZONE || 'Asia/Kolkata';
+function todayStr(offsetDays = 0) {
+  const d = new Date(Date.now() + offsetDays * 86400000);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: GYM_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+
+// SECURITY FIX: the staff "deleteMembers" permission was only hidden in the
+// UI; anyone with a staff token could still call DELETE directly.
+function requireDelete(req, res, next) {
+  if (req.user.role === 'staff' && !(req.user.permissions && req.user.permissions.deleteMembers)) {
+    return res.status(403).json({ error: 'You do not have permission to delete.' });
+  }
+  next();
+}
+
+// Get all members (only current user's members)
+router.get('/', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const members = await Member.findAll({ where: { userId: gymId }, order: [['joinDate', 'DESC']] });
+    res.json(members);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get dashboard stats
+router.get('/stats', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const today = todayStr();
+
+    // Run the independent counts/queries in parallel instead of one after
+    // another — this endpoint used to pay 3 sequential DB round trips
+    // (totalMembers -> activeToday -> activeMembers) for numbers that
+    // don't depend on each other at all.
+    const [totalMembers, activeToday, activeMembers] = await Promise.all([
+      Member.count({ where: { userId: gymId } }),
+      Attendance.count({ where: { userId: gymId, date: today, status: 'Present' } }),
+      Member.findAll({ where: { userId: gymId, status: 'Active' }, attributes: ['plan'] })
+    ]);
+
+    const revenueMap = {
+      '1 Month Strength': 1000,
+      '1 Month Strength + Cardio': 1500,
+      '3 Months Strength': 2700,
+      '3 Months Strength + Cardio': 4000,
+      '6 Months Strength': 5000,
+      '6 Months Strength + Cardio': 7500,
+      '1 Year Strength': 9000,
+      '1 Year Strength + Cardio': 14000
+    };
+
+    let estimatedRevenue = 0;
+    activeMembers.forEach(m => { estimatedRevenue += revenueMap[m.plan] || 0; });
+
+    res.json({ totalMembers, activeToday, estimatedRevenue });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Safety net: reject any photo over ~40KB (frontend compresses to ~20-24KB;
+// this just guards against old cached frontend code or direct API calls).
+const MAX_PHOTO_BYTES = 40 * 1024;
+function checkPhotoSize(photo) {
+  if (!photo) return null;
+  const approxBytes = Math.round(photo.length * 0.75); // base64 -> bytes
+  if (approxBytes > MAX_PHOTO_BYTES) {
+    return `Photo is too large (${Math.round(approxBytes / 1024)}KB). Please retake or re-upload — it should auto-compress to under 25KB.`;
+  }
+  return null;
+}
+
+// Add new member
+router.post('/', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const memberData = { ...req.body };
+    // one clean 10-digit phone, so "+91 98765 43210" and "9876543210" are the same person
+    memberData.phone = String(memberData.phone || '').replace(/\D/g, '').slice(-10);
+    ['id', '_id', 'userId', 'createdAt', 'updatedAt', 'isDeleted'].forEach(k => delete memberData[k]);
+
+    const photoErr = checkPhotoSize(memberData.photo);
+    if (photoErr) return res.status(400).json({ error: photoErr });
+
+    // SPEED FIX: the gym-owner lookup (for the member-limit check) and the
+    // duplicate-phone check don't depend on each other at all, but used to
+    // run one after another — an extra full DB round trip on every single
+    // "Add Member" request. Run them in parallel instead.
+    // gymId may belong to either the owner's own account (primary gym) or
+    // a row in the Gym table (an additional gym) — check both, since only
+    // checking User previously let additional gyms bypass their limit
+    // entirely.
+    const [gymOwner, existingMember] = await Promise.all([
+      User.findByPk(gymId),
+      Member.findOne({ where: { userId: gymId, phone: memberData.phone } })
+    ]);
+
+    if (existingMember) {
+      return res.status(409).json({ error: `This phone number is already registered in this gym (${existingMember.name}, ID #${existingMember.memberNo || existingMember.id}). Use a different number or open that member.` });
+    }
+
+    let memberLimit = gymOwner ? gymOwner.memberLimit : null;
+    if (!gymOwner) {
+      const gymRow = await Gym.findByPk(gymId);
+      if (gymRow) memberLimit = gymRow.memberLimit;
+    }
+    if (memberLimit) {
+      const currentCount = await Member.count({ where: { userId: gymId } });
+      if (currentCount >= memberLimit) {
+        return res.status(403).json({
+          error: `Member limit reached (${memberLimit} members). Contact GymPro support to increase your limit.`
+        });
+      }
+    }
+
+    const newMember = await Member.create({ ...memberData, userId: gymId });
+    res.status(201).json(newMember);
+  } catch (err) {
+    // Log on separate lines — a single long line (the previous behavior)
+    // was getting visually cut off in the hosting panel's log viewer,
+    // hiding the actual cause behind "Add member error: Error".
+    console.error('❌ Add member error — name:', err.name);
+    console.error('❌ Add member error — message:', err.message);
+    if (err.errors && err.errors.length) {
+      err.errors.forEach((e, i) => console.error(`❌ Add member error — detail ${i + 1}:`, e.message, '| field:', e.path, '| value:', e.value));
+    }
+    if (err.parent) console.error('❌ Add member error — DB detail:', err.parent.sqlMessage || err.parent.message);
+
+    // two requests racing past the check above are stopped by the unique (gym, phone) index
+    if (err.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({ error: 'This phone number is already registered in this gym.' });
+    }
+    const detail = (err.errors && err.errors[0]?.message) || err.parent?.sqlMessage || err.message || 'Unknown error';
+    res.status(400).json({ error: detail });
+  }
+});
+
+// Moves the member's LATEST payment (one whole transaction) to a new date and
+// re-syncs lastPaymentDate, so the card, payment history and every revenue
+// report (which read the history) all agree. Returns the fields to save.
+function paymentDateEdit(member, dateStr) {
+  const newIso = new Date(dateStr + 'T00:00:00.000Z').toISOString();
+  const hist = (Array.isArray(member.paymentHistory) ? member.paymentHistory : []).map(p => ({ ...p }));
+  if (hist.length) {
+    const t = p => new Date(p.date).getTime() || 0;
+    let latest = hist[0];
+    hist.forEach(p => { if (t(p) >= t(latest)) latest = p; });
+    const key = p => p.groupId || p.receiptNo || null;
+    const k = key(latest);
+    hist.forEach(p => {
+      // same transaction = same groupId/receiptNo; legacy rows without either = same timestamp
+      if (p === latest || (k ? key(p) === k : p.date === latest.date)) p.date = newIso;
+    });
+  }
+  const times = hist.map(p => new Date(p.date).getTime()).filter(n => !isNaN(n));
+  return {
+    paymentHistory: hist,
+    lastPaymentDate: times.length ? new Date(Math.max(...times)) : new Date(newIso)
+  };
+}
+
+// Edit / Update an existing member
+router.put('/:id', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const memberData = { ...req.body };
+    // SECURITY/DATE FIX: never let the client overwrite ownership or
+    // server-managed columns via a PUT body.
+    ['id', '_id', 'userId', 'createdAt', 'updatedAt', 'paymentDate'].forEach(k => delete memberData[k]);
+    if (memberData.phone !== undefined) memberData.phone = String(memberData.phone || '').replace(/\D/g, '').slice(-10);
+    const editPaymentDate = memberData.editPaymentDate;
+    delete memberData.editPaymentDate;
+    if (editPaymentDate !== undefined && editPaymentDate !== null && editPaymentDate !== '') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(editPaymentDate) || isNaN(new Date(editPaymentDate + 'T00:00:00Z')))
+        return res.status(400).json({ error: 'Invalid payment date' });
+      if (editPaymentDate > todayStr())
+        return res.status(400).json({ error: 'Payment date cannot be in the future' });
+    }
+
+    const photoErr = checkPhotoSize(memberData.photo);
+    if (photoErr) return res.status(400).json({ error: photoErr });
+
+    // SPEED FIX: same as above — the duplicate-phone check (when phone is
+    // being changed) and loading the member being edited don't depend on
+    // each other, so run them in parallel instead of sequentially.
+    const [existingMember, member] = await Promise.all([
+      memberData.phone
+        ? Member.findOne({ where: { userId: gymId, phone: memberData.phone, id: { [Op.ne]: req.params.id } } })
+        : Promise.resolve(null),
+      Member.findOne({ where: { id: req.params.id, userId: gymId } })
+    ]);
+
+    if (memberData.phone && existingMember) {
+      return res.status(409).json({ error: `Another member in this gym already has this phone number (${existingMember.name}, ID #${existingMember.memberNo || existingMember.id}).` });
+    }
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    if (editPaymentDate) Object.assign(memberData, paymentDateEdit(member, editPaymentDate));
+
+    await member.update(memberData);
+    res.json(member);
+  } catch (err) {
+    console.error('Update member error:', err);
+    if (err.name === 'SequelizeUniqueConstraintError') return res.status(409).json({ error: 'Another member in this gym already has this phone number.' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete member
+// Delete member (Soft delete to preserve revenue history)
+router.delete('/:id', requireDelete, async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const member = await Member.findOne({ where: { id: req.params.id, userId: gymId } });
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    await Attendance.destroy({ where: { userId: gymId, memberId: req.params.id } });
+
+    const history = member.paymentHistory || [];
+    if (history.length > 0) {
+      // Soft delete: keep row for revenue, mark as deleted, alter phone to free it up
+      member.isDeleted = true;
+      member.phone = member.phone + '_del_' + Date.now();
+      member.status = 'Inactive';
+      await member.save();
+    } else {
+      // Hard delete: no financial records tied to this member
+      await member.destroy();
+    }
+    res.json({ message: 'Member deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// NEW: Delete specific payment from history
+// Delete specific payment from history (Supports both new Group IDs and Legacy Single records)
+router.delete('/:id/payment/:groupId', requireDelete, async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const member = await Member.findOne({ where: { id: req.params.id, userId: gymId } });
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    const history = member.paymentHistory || [];
+    
+    // Filter out the payment. Includes a fallback `single-${i}` to catch old legacy payments
+    const filteredHistory = history.filter((p, i) => {
+      const matchGroupId = p.groupId === req.params.groupId;
+      const matchReceiptNo = p.receiptNo === req.params.groupId;
+      const matchLegacyIndex = `single-${i}` === req.params.groupId;
+      
+      // If any of these match, we REMOVE it from the array
+      return !(matchGroupId || matchReceiptNo || matchLegacyIndex);
+    });
+
+    if (history.length === filteredHistory.length) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    member.paymentHistory = filteredHistory;
+    // DATE FIX: keep "Payment Date" in sync with what's actually left in the history
+    const remainingDates = filteredHistory.map(p => new Date(p.date)).filter(d => !isNaN(d));
+    member.lastPaymentDate = remainingDates.length ? new Date(Math.max(...remainingDates)) : null;
+    
+    // ZOMBIE CLEANUP: If soft-deleted member has their last remaining payment deleted, hard delete them
+    if (member.isDeleted && filteredHistory.length === 0 && Number(member.pendingAmount) <= 0) {
+      await member.destroy();
+    } else {
+      await member.save();
+    }
+    
+    res.json({ message: 'Payment deleted successfully', paymentHistory: filteredHistory });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get attendance for a specific date (mimics old .populate('memberId'))
+router.get('/attendance/:date', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const { date } = req.params;
+    const rows = await Attendance.findAll({
+      where: { userId: gymId, date },
+      include: [{ model: Member, as: 'member', attributes: ['id', 'name', 'phone', 'plan', 'status'] }]
+    });
+
+    const result = rows.map(r => {
+      const obj = r.toJSON();
+      obj.memberId = obj.member || null; // replicate populated shape
+      delete obj.member;
+      return obj;
+    });
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mark attendance
+router.post('/attendance', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const { memberId, date, status } = req.body;
+
+    const member = await Member.findOne({ where: { id: memberId, userId: gymId } });
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    let attendance = await Attendance.findOne({ where: { userId: gymId, memberId, date } });
+    if (attendance) {
+      attendance.status = status;
+      attendance.markedAt = new Date();
+      await attendance.save();
+    } else {
+      attendance = await Attendance.create({ userId: gymId, memberId, date, status, markedAt: new Date() });
+    }
+
+    res.json(attendance);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Attendance stats
+router.get('/attendance/stats/:date', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const { date } = req.params;
+
+    // SPEED FIX: these two counts are independent — run in parallel.
+    const [totalActive, presentCount] = await Promise.all([
+      Member.count({ where: { userId: gymId, status: { [Op.in]: ['Active', 'Trial'] } } }),
+      Attendance.count({ where: { userId: gymId, date, status: 'Present' } })
+    ]);
+    const attendancePercentage = totalActive > 0 ? Math.round((presentCount / totalActive) * 100) : 0;
+
+    res.json({ totalActive, presentCount, attendancePercentage });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Payment reminders
+router.get('/payment-reminders', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const dueMembers = await Member.findAll({
+      where: {
+        userId: gymId,
+        status: 'Active',
+        expiryDate: { [Op.lte]: new Date(todayStr(7) + 'T00:00:00.000Z') }
+      }
+    });
+
+    res.json({ dueCount: dueMembers.length, dueMembers, overdueCount: 0 });
+  } catch (err) {
+    res.json({ dueCount: 0, dueMembers: [], overdueCount: 0 });
+  }
+});
+
+// Monthly due
+router.get('/monthly-due/:memberId', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const member = await Member.findOne({ where: { id: req.params.memberId, userId: gymId } });
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    const planPrices = {
+      '1 Month Strength': 1000,
+      '1 Month Strength + Cardio': 1500,
+      '3 Months Strength': 900,
+      '3 Months Strength + Cardio': 1333,
+      '6 Months Strength': 833,
+      '6 Months Strength + Cardio': 1250,
+      '1 Year Strength': 750,
+      '1 Year Strength + Cardio': 1167
+    };
+
+    const monthlyAmount = planPrices[member.plan] || 0;
+    const expStr = member.expiryDate ? new Date(member.expiryDate).toISOString().slice(0, 10) : null;
+    const isDue = !!expStr && expStr < todayStr();
+
+    res.json({
+      memberName: member.name,
+      monthlyAmount: Math.round(monthlyAmount),
+      nextDueDate: member.expiryDate,
+      isOverdue: isDue,
+      daysOverdue: isDue ? Math.round((new Date(todayStr() + 'T00:00:00Z') - new Date(expStr + 'T00:00:00Z')) / 86400000) : 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Record the timestamp when a reminder is sent via WhatsApp
+router.post('/send-reminder/:memberId', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const member = await Member.findOne({ where: { id: req.params.memberId, userId: gymId } });
+    
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    member.lastReminderSent = new Date();
+    await member.save();
+
+    res.json({ message: 'Reminder timestamp updated successfully', lastReminderSent: member.lastReminderSent });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get ONE member. (The frontend calls GET /members/:id after deleting a
+// payment; this route didn't exist, so the request fell through to the SPA
+// catch-all and returned index.html -> "Network error".) Must stay LAST so it
+// doesn't shadow /stats, /payment-reminders etc.
+router.get('/:id', async (req, res) => {
+  try {
+    const gymId = req.user.gymId || req.user.userId;
+    const member = await Member.findOne({ where: { id: req.params.id, userId: gymId } });
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+    res.json(member);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;
